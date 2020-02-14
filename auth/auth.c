@@ -42,10 +42,10 @@ static const serf__authn_scheme_t *serf_authn_schemes[] = {
     &serf__ntlm_authn_scheme,
 #endif /* #ifdef WIN32 */
 #endif /* SERF_HAVE_SPNEGO */
+    &serf__http_sig_authn_scheme,
     &serf__digest_authn_scheme,
     &serf__basic_authn_scheme,
     /* ADD NEW AUTHENTICATION IMPLEMENTATIONS HERE (as they're written) */
-
     /* sentinel */
     NULL
 };

@@ -899,6 +899,7 @@ void serf_config_proxy(
 #define SERF_AUTHN_DIGEST    0x02
 #define SERF_AUTHN_NTLM      0x04
 #define SERF_AUTHN_NEGOTIATE 0x08
+#define SERF_AUTHN_SIGNATURE 0x10
 #define SERF_AUTHN_ALL       0xFF
 
 /**

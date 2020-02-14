@@ -139,6 +139,8 @@ extern const serf__authn_scheme_t serf__ntlm_authn_scheme;
 
 #endif /* SERF_HAVE_SPNEGO */
 
+extern const serf__authn_scheme_t serf__http_sig_authn_scheme;
+
 #ifdef __cplusplus
 }
 #endif

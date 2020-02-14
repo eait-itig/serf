@@ -279,7 +279,7 @@ if sys.platform != 'win32':
   env = conf.Finish()
 
   if have_gcc:
-    env.Append(CFLAGS=['-std=c89'])
+    env.Append(CFLAGS=['-std=c99'])
     env.Append(CCFLAGS=['-Wdeclaration-after-statement',
                         '-Wmissing-prototypes',
                         '-Wall'])
@@ -329,7 +329,8 @@ if sys.platform == 'win32':
   SHARED_SOURCES.append(dll_res)
 
 SOURCES = Glob('src/*.c') + Glob('buckets/*.c') + Glob('auth/*.c') + \
-          Glob('protocols/*.c')
+          Glob('protocols/*.c') + Glob('libssh/*.c') + Glob('chapoly/*.c') + \
+          Glob('ed25519/*.c')
 
 lib_static = env.StaticLibrary(LIBNAME, SOURCES)
 lib_shared = env.SharedLibrary(SHLIBNAME, SOURCES + SHARED_SOURCES)
@@ -498,6 +499,8 @@ else:
 # Check for OpenSSL functions which are only available in some of
 # the versions we support. Also handles forks like LibreSSL.
 conf = Configure(env)
+if not conf.CheckFunc('strlcpy'):
+  env.ParseConfig("pkg-config libbsd-overlay --cflags --libs")
 if conf.CheckCHeader('openssl/applink.c'):
   env.Append(CPPDEFINES=['SERF_HAVE_OPENSSL_APPLINK_C'])
 if not conf.CheckFunc('BIO_set_init', '#include <openssl/crypto.h>'):
@@ -514,6 +517,10 @@ if not conf.CheckFunc('ASN1_STRING_get0_data', '#include <openssl/crypto.h>'):
   env.Append(CPPDEFINES=['SERF_NO_SSL_ASN1_STRING_GET0_DATA'])
 if conf.CheckFunc('CRYPTO_set_locking_callback', '#include <openssl/crypto.h>'):
   env.Append(CPPDEFINES=['SERF_HAVE_SSL_LOCKING_CALLBACKS'])
+if conf.CheckFunc('EVP_CIPHER_CTX_iv'):
+  env.Append(CPPDEFINES=['HAVE_EVP_CIPHER_CTX_IV'])
+if conf.CheckFunc('EVP_CIPHER_CTX_iv_noconst'):
+  env.Append(CPPDEFINES=['HAVE_EVP_CIPHER_CTX_IV_NOCONST'])
 if conf.CheckFunc('OPENSSL_malloc_init', '#include <openssl/crypto.h>'):
   env.Append(CPPDEFINES=['SERF_HAVE_OPENSSL_MALLOC_INIT'])
 if conf.CheckFunc('SSL_library_init', '#include <openssl/crypto.h>'):
@@ -524,6 +531,24 @@ if conf.CheckFunc('SSL_set_alpn_protos'):
   env.Append(CPPDEFINES=['SERF_HAVE_OPENSSL_ALPN'])
 if conf.CheckType('OSSL_HANDSHAKE_STATE', '#include <openssl/ssl.h>'):
   env.Append(CPPDEFINES=['SERF_HAVE_OSSL_HANDSHAKE_STATE'])
+if conf.CheckFunc('EVP_CIPHER_CTX_get_iv'):
+  env.Append(CPPDEFINES=['HAVE_EVP_CIPHER_CTX_GET_IV'])
+if conf.CheckFunc('RSA_set0_key'):
+  env.Append(CPPDEFINES=['HAVE_RSA_SET0_KEY'])
+if conf.CheckFunc('RSA_get0_key'):
+  env.Append(CPPDEFINES=['HAVE_RSA_GET0_KEY'])
+if conf.CheckFunc('RSA_get0_crt_params'):
+  env.Append(CPPDEFINES=['HAVE_RSA_GET0_CRT_PARAMS'])
+if conf.CheckFunc('RSA_set0_crt_params'):
+  env.Append(CPPDEFINES=['HAVE_RSA_SET0_CRT_PARAMS'])
+if conf.CheckFunc('RSA_get0_factors'):
+  env.Append(CPPDEFINES=['HAVE_RSA_GET0_FACTORS'])
+if conf.CheckFunc('RSA_set0_factors'):
+  env.Append(CPPDEFINES=['HAVE_RSA_SET0_FACTORS'])
+if conf.CheckFunc('ECDSA_SIG_get0'):
+  env.Append(CPPDEFINES=['HAVE_ECDSA_SIG_GET0'])
+if conf.CheckFunc('ECDSA_SIG_set0'):
+  env.Append(CPPDEFINES=['HAVE_ECDSA_SIG_SET0'])
 env = conf.Finish()
 
 # If build with gssapi, get its information and define SERF_HAVE_GSSAPI
