@@ -174,6 +174,7 @@ static int handle_auth_headers(int code,
  */
 typedef struct auth_baton_t {
     const char *header;
+    const char *altheaderprefix;
     apr_pool_t *pool;
     apr_hash_t *hdrs;
 } auth_baton_t;
@@ -187,8 +188,12 @@ static int store_header_in_dict(void *baton,
     char *auth_name, *c;
 
     /* We're only interested in xxxx-Authenticate headers. */
-    if (strcasecmp(key, ab->header) != 0)
-        return 0;
+    if (strcasecmp(key, ab->header) != 0) {
+        if (strncasecmp(key, ab->altheaderprefix,
+            strlen(ab->altheaderprefix)) != 0) {
+                return 0;
+        }
+    }
 
     /* Extract the authentication scheme name.  */
     auth_attr = strchr(header, ' ');
@@ -223,10 +228,13 @@ static apr_status_t dispatch_auth(int code,
         ab.hdrs = apr_hash_make(pool);
         ab.pool = pool;
 
-        if (code == 401)
+        if (code == 401) {
             ab.header = "WWW-Authenticate";
-        else
+            ab.altheaderprefix = "X-WWW-Authenticate";
+        } else {
             ab.header = "Proxy-Authenticate";
+            ab.altheaderprefix = "X-Proxy-Authenticate";
+        }
 
         hdrs = serf_bucket_response_get_headers(response);
 
