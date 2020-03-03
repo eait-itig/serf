@@ -59,9 +59,14 @@ typedef struct sig_authn_info_t {
     const char      *sai_user;
 
     const char      *sai_date;
+    time_t           sai_dateat;
     const char      *sai_alg;
     const char      *sai_agalg;
     sig_authn_hdr_t *sai_hdrs;
+
+    const char      *sai_last_tosign;
+    size_t           sai_last_dlen;
+    const char      *sai_last_sigstr;
 } sig_authn_info_t;
 
 static apr_status_t
@@ -69,18 +74,22 @@ cleanup_ctx(void *data)
 {
     sig_authn_info_t *sig_info = (sig_authn_info_t *)data;
     sshkey_free(sig_info->sai_key);
-    close(sig_info->sai_authfd);
+    if (sig_info->sai_authfd != 0)
+        close(sig_info->sai_authfd);
     return (APR_SUCCESS);
 }
 
-static const char *
-httpsig_gen_date(apr_pool_t *pool)
+static void
+httpsig_gen_date(sig_authn_info_t *sig_info)
 {
     char datebuf[128];
     time_t now = time(0);
-    struct tm *tm = gmtime(&now);
-    strftime(datebuf, sizeof (datebuf), "%a, %d %b %Y %H:%M:%S %Z", tm);
-    return (apr_pstrdup(pool, datebuf));
+    if (sig_info->sai_date == NULL || now - sig_info->sai_dateat > 5) {
+        struct tm *tm = gmtime(&now);
+        strftime(datebuf, sizeof (datebuf), "%a, %d %b %Y %H:%M:%S %Z", tm);
+        sig_info->sai_date = apr_pstrdup(sig_info->sai_pool, datebuf);
+        sig_info->sai_dateat = now;
+    }
 }
 
 enum parse_state {
@@ -117,8 +126,6 @@ serf__handle_httpsig_auth(const serf__authn_scheme_t *scheme,
      * This is per-connection/per-auth level stuff which is cached -- we could
      * do this in init_httpsig_connection() but we might not ever actually use
      * Signature auth, so only do it if we're going to make an actual req.
-     *
-     * Note this means that we use conn->pool here for memory.
      */
     if (sig_info->sai_key == NULL) {
         struct ssh_identitylist *idl = NULL;
@@ -163,22 +170,22 @@ serf__handle_httpsig_auth(const serf__authn_scheme_t *scheme,
     /*
      * Initialise the per-request state.
      *
-     * Here we start using conn->pool.
+     * Here we start using pool.
      */
-    sig_info->sai_date = httpsig_gen_date(conn->pool);
+    httpsig_gen_date(sig_info);
     sig_info->sai_hdrs = NULL;
     sig_info->sai_alg = NULL;
 
     /* Parse the auth attributes if we were given any by the server */
-    attr = apr_pstrdup(conn->pool, (auth_attr == NULL) ? "" : auth_attr);
+    attr = apr_pstrdup(pool, auth_attr);
     st = ST_KEY;
     stb = attr;
-    for (i = 0; attr[i] != '\0'; ++i) {
+    for (i = 0; attr != NULL && attr[i] != '\0'; ++i) {
         switch (st) {
         case ST_KEY:
             if (attr[i] == '=') {
                 attr[i] = '\0';
-                k = apr_pstrdup(conn->pool, stb);
+                k = apr_pstrdup(pool, stb);
                 attr[i] = '=';
                 stb = &attr[i + 1];
                 st = ST_VAL;
@@ -187,7 +194,7 @@ serf__handle_httpsig_auth(const serf__authn_scheme_t *scheme,
         case ST_VAL:
             if (attr[i] == ',') {
                 attr[i] = '\0';
-                v = apr_pstrdup(conn->pool, stb);
+                v = apr_pstrdup(pool, stb);
                 attr[i] = ',';
                 while (attr[i + 1] != '\0' && isspace(attr[i + 1]))
                     ++i;
@@ -197,6 +204,9 @@ serf__handle_httpsig_auth(const serf__authn_scheme_t *scheme,
             } else if (attr[i] == '"') {
                 stb = &attr[i + 1];
                 st = ST_VAL_QUO;
+            } else if (attr[i + 1] == '\0') {
+                v = apr_pstrdup(pool, stb);
+                goto gotkv;
             }
             break;
         case ST_VAL_QUO:
@@ -204,7 +214,7 @@ serf__handle_httpsig_auth(const serf__authn_scheme_t *scheme,
                 ++i;
             } else if (attr[i] == '"') {
                 attr[i] = '\0';
-                v = apr_pstrdup(conn->pool, stb);
+                v = apr_pstrdup(pool, stb);
                 attr[i] = '"';
                 while (attr[i + 1] != '\0' && (
                   isspace(attr[i + 1]) || attr[i + 1] == ',')) {
@@ -222,26 +232,27 @@ gotkv:
         if (strcasecmp(k, "headers") == 0) {
             char *saveptr;
             char *term;
-            sig_authn_hdr_t *lasthdr = sig_info->sai_hdrs;
-            while (lasthdr != NULL && lasthdr->sah_next != NULL)
-                lasthdr = lasthdr->sah_next;
+            sig_authn_hdr_t *lasthdr;
+
+            lasthdr = sig_info->sai_hdrs = NULL;
 
             term = strtok_r(v, " ", &saveptr);
-            do {
-                hdr = apr_pcalloc(conn->pool, sizeof (sig_authn_hdr_t));
-                hdr->sah_name = apr_pstrdup(conn->pool, term);
+            while (term != NULL) {
+                hdr = apr_pcalloc(pool, sizeof (sig_authn_hdr_t));
+                hdr->sah_name = apr_pstrdup(pool, term);
                 if (lasthdr == NULL) {
                     lasthdr = sig_info->sai_hdrs = hdr;
                 } else {
                     lasthdr->sah_next = hdr;
                     lasthdr = hdr;
                 }
-            } while ((term = strtok_r(NULL, " ", &saveptr)) != NULL);
+                term = strtok_r(NULL, " ", &saveptr);
+            }
         }
     }
 
     if (sig_info->sai_hdrs == NULL) {
-        hdr = apr_pcalloc(conn->pool, sizeof (sig_authn_hdr_t));
+        hdr = apr_pcalloc(pool, sizeof (sig_authn_hdr_t));
         hdr->sah_name = "date";
         sig_info->sai_hdrs = hdr;
     }
@@ -326,7 +337,7 @@ static const char *
 hdrscat(apr_pool_t *pool, const char *hdrs, const char *val)
 {
     if (hdrs == NULL)
-        return (val);
+        return (apr_pstrdup(pool, val));
     return (apr_pstrcat(pool, hdrs, " ", val, NULL));
 }
 
@@ -360,54 +371,73 @@ serf__setup_request_httpsig_auth(const serf__authn_scheme_t *scheme,
     char *methodl;
     const char *hv, *hdrval;
     uint i;
-    apr_pool_t *buildpool;
+    apr_pool_t *pool, *buildpool = NULL;
 
     authn_info = serf__get_authn_info_for_server(conn);
     sig_info = authn_info->baton;
 
-    if (sig_info && sig_info->sai_hdrs) {
-        if (apr_pool_create(&buildpool, conn->pool) != APR_SUCCESS) {
-            return SERF_ERROR_AUTHN_FAILED;
-        }
+    if (sig_info == NULL || sig_info->sai_hdrs == NULL) {
+        return SERF_ERROR_AUTHN_FAILED;
+    }
 
-        hdr = sig_info->sai_hdrs;
-        while (hdr != NULL) {
-            if (strcasecmp(hdr->sah_name, "date") == 0) {
-                hdrs = hdrscat(buildpool, hdrs, "date");
-                tosign = tosigncat(buildpool, tosign, "date",
-                    sig_info->sai_date);
-                serf_bucket_headers_setn(hdrs_bkt, "Date", sig_info->sai_date);
-            } else if (strcasecmp(hdr->sah_name, "(keyid)") == 0) {
-                hdrs = hdrscat(buildpool, hdrs, "(keyid)");
-                tosign = tosigncat(buildpool, tosign, "(keyid)",
-                    sig_info->sai_keyid);
-            } else if (strcasecmp(hdr->sah_name, "(algorithm)") == 0) {
-                hdrs = hdrscat(buildpool, hdrs, "(algorithm)");
-                tosign = tosigncat(buildpool, tosign, "(algorithm)",
-                    sig_info->sai_alg);
-            } else if (strcasecmp(hdr->sah_name, "(request-target)") == 0) {
-                hdrs = hdrscat(buildpool, hdrs, "(request-target)");
-                methodl = apr_pstrdup(buildpool, method);
-                for (i = 0; i < strlen(methodl); ++i)
-                    methodl[i] = tolower(methodl[i]);
-                hv = apr_pstrcat(buildpool, methodl, " ", uri, NULL);
-                tosign = tosigncat(buildpool, tosign, "(request-target)",
-                    hv);
-            } else {
-                hv = serf_bucket_headers_get(hdrs_bkt, hdr->sah_name);
-                if (hv == NULL) {
-                    return SERF_ERROR_AUTHN_FAILED;
-                }
-                hdrs = hdrscat(buildpool, hdrs, hdr->sah_name);
-                tosign = tosigncat(buildpool, tosign, hdr->sah_name, hv);
+    httpsig_gen_date(sig_info);
+
+    pool = sig_info->sai_pool;
+    if (apr_pool_create(&buildpool, pool) != APR_SUCCESS) {
+        return SERF_ERROR_AUTHN_FAILED;
+    }
+
+    hdr = sig_info->sai_hdrs;
+    while (hdr != NULL) {
+        if (strcasecmp(hdr->sah_name, "date") == 0) {
+            hdrs = hdrscat(buildpool, hdrs, "date");
+            tosign = tosigncat(buildpool, tosign, "date",
+                sig_info->sai_date);
+            serf_bucket_headers_setn(hdrs_bkt, "Date", sig_info->sai_date);
+        } else if (strcasecmp(hdr->sah_name, "(keyid)") == 0) {
+            hdrs = hdrscat(buildpool, hdrs, "(keyid)");
+            tosign = tosigncat(buildpool, tosign, "(keyid)",
+                sig_info->sai_keyid);
+        } else if (strcasecmp(hdr->sah_name, "(algorithm)") == 0) {
+            hdrs = hdrscat(buildpool, hdrs, "(algorithm)");
+            tosign = tosigncat(buildpool, tosign, "(algorithm)",
+                sig_info->sai_alg);
+        } else if (strcasecmp(hdr->sah_name, "(request-target)") == 0) {
+            hdrs = hdrscat(buildpool, hdrs, "(request-target)");
+            methodl = apr_pstrdup(buildpool, method);
+            for (i = 0; i < strlen(methodl); ++i)
+                methodl[i] = tolower(methodl[i]);
+            hv = apr_pstrcat(buildpool, methodl, " ", uri, NULL);
+            tosign = tosigncat(buildpool, tosign, "(request-target)", hv);
+        } else {
+            hv = serf_bucket_headers_get(hdrs_bkt, hdr->sah_name);
+            if (hv == NULL) {
+                apr_pool_destroy(buildpool);
+                return SERF_ERROR_AUTHN_FAILED;
             }
-            hdr = hdr->sah_next;
+            hdrs = hdrscat(buildpool, hdrs, hdr->sah_name);
+            tosign = tosigncat(buildpool, tosign, hdr->sah_name, hv);
         }
-        dlen = strlen(tosign);
+        hdr = hdr->sah_next;
+    }
+    dlen = strlen(tosign);
 
+    /*
+     * Is the signing string the same as the last request? (can we just
+     * re-use that signature and not talk to the agent again?)
+     */
+    if (sig_info->sai_last_dlen == dlen &&
+        bcmp(sig_info->sai_last_tosign, tosign, dlen) == 0) {
+
+        /* We can re-use it! */
+        sigstr = (char *)sig_info->sai_last_sigstr;
+
+    } else {
+        /* Generate a new signature */
         rc = ssh_agent_sign(sig_info->sai_authfd, sig_info->sai_key,
             &ssig, &ssiglen, (u_char *)tosign, dlen, sig_info->sai_agalg, 0);
         if (rc != 0) {
+            apr_pool_destroy(buildpool);
             return SERF_ERROR_AUTHN_FAILED;
         }
 
@@ -416,26 +446,36 @@ serf__setup_request_httpsig_auth(const serf__authn_scheme_t *scheme,
         explicit_bzero(ssig, ssiglen);
         free(ssig);
         if (rc != 0) {
+            apr_pool_destroy(buildpool);
             return SERF_ERROR_AUTHN_FAILED;
         }
 
-        sigstr = apr_palloc(conn->pool, apr_base64_encode_len(siglen) + 1);
+        /*
+         * Since we're going to stash the sigstr potentially for the next req
+         * we allocate it from pool (not buildpool)
+         */
+        sigstr = apr_palloc(pool, apr_base64_encode_len(siglen) + 1);
         apr_base64_encode_binary(sigstr, sig, siglen);
 
-        hdrval = apr_pstrcat(conn->pool, "Signature "
-            "headers=\"", hdrs, "\",",
-            "keyId=\"", sig_info->sai_keyid, "\",",
-            "algorithm=\"", sig_info->sai_alg, "\",",
-            "signature=\"", sigstr, "\"",
-            NULL);
+        explicit_bzero(sig, siglen);
+        free(sig);
 
-        apr_pool_destroy(buildpool);
-
-        serf_bucket_headers_setn(hdrs_bkt, "Authorization", hdrval);
-        return APR_SUCCESS;
+        sig_info->sai_last_dlen = dlen;
+        sig_info->sai_last_tosign = apr_pstrdup(pool, tosign);
+        sig_info->sai_last_sigstr = sigstr;
     }
 
-    return SERF_ERROR_AUTHN_FAILED;
+    hdrval = apr_pstrcat(pool, "Signature "
+        "headers=\"", hdrs, "\",",
+        "keyId=\"", sig_info->sai_keyid, "\",",
+        "algorithm=\"", sig_info->sai_alg, "\",",
+        "signature=\"", sigstr, "\"",
+        NULL);
+
+    apr_pool_destroy(buildpool);
+
+    serf_bucket_headers_setn(hdrs_bkt, "Authorization", hdrval);
+    return APR_SUCCESS;
 }
 
 /* Implements serf__validate_response_func_t callback. */
