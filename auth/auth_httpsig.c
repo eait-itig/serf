@@ -60,6 +60,7 @@ typedef struct sig_authn_info_t {
 
     const char      *sai_date;
     time_t           sai_dateat;
+    const char      *sai_opaque;
     const char      *sai_alg;
     const char      *sai_agalg;
     sig_authn_hdr_t *sai_hdrs;
@@ -175,6 +176,7 @@ serf__handle_httpsig_auth(const serf__authn_scheme_t *scheme,
     httpsig_gen_date(sig_info);
     sig_info->sai_hdrs = NULL;
     sig_info->sai_alg = NULL;
+    sig_info->sai_opaque = NULL;
 
     /* Parse the auth attributes if we were given any by the server */
     attr = apr_pstrdup(pool, auth_attr);
@@ -248,6 +250,9 @@ gotkv:
                 }
                 term = strtok_r(NULL, " ", &saveptr);
             }
+        }
+        if (strcasecmp(k, "opaque") == 0) {
+            sig_info->sai_opaque = apr_pstrdup(conn->pool, v);
         }
     }
 
@@ -409,6 +414,14 @@ serf__setup_request_httpsig_auth(const serf__authn_scheme_t *scheme,
                 methodl[i] = tolower(methodl[i]);
             hv = apr_pstrcat(buildpool, methodl, " ", uri, NULL);
             tosign = tosigncat(buildpool, tosign, "(request-target)", hv);
+        } else if (strcasecmp(hdr->sah_name, "(opaque)") == 0) {
+            if (sig_info->sai_opaque == NULL) {
+                apr_pool_destroy(buildpool);
+                return SERF_ERROR_AUTHN_FAILED;
+            }
+            hdrs = hdrscat(buildpool, hdrs, "(opaque)");
+            tosign = tosigncat(buildpool, tosign, "(opaque)",
+                sig_info->sai_opaque);
         } else {
             hv = serf_bucket_headers_get(hdrs_bkt, hdr->sah_name);
             if (hv == NULL) {
@@ -465,12 +478,17 @@ serf__setup_request_httpsig_auth(const serf__authn_scheme_t *scheme,
         sig_info->sai_last_sigstr = sigstr;
     }
 
-    hdrval = apr_pstrcat(pool, "Signature "
+    hdrval = apr_pstrcat(buildpool, "Signature "
         "headers=\"", hdrs, "\",",
         "keyId=\"", sig_info->sai_keyid, "\",",
         "algorithm=\"", sig_info->sai_alg, "\",",
         "signature=\"", sigstr, "\"",
         NULL);
+    if (sig_info->sai_opaque != NULL) {
+        hdrval = apr_pstrcat(buildpool, hdrval,
+            ",opaque=\"", sig_info->sai_opaque, "\"", NULL);
+    }
+    hdrval = apr_pstrdup(pool, hdrval);
 
     apr_pool_destroy(buildpool);
 
